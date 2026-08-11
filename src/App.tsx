@@ -1,0 +1,216 @@
+import { ChangeEvent, useMemo, useState } from 'react'
+import { Question, questions, sessions, sourceLabel, SourceType, subjects, topics } from './data'
+import { createMockExam, filterQuestions, randomSelectQuestions } from './domain'
+
+type Page = 'home' | 'practice' | 'mock' | 'wrong' | 'history' | 'settings'
+type Mode = 'practice' | 'mock' | 'wrong'
+type Answer = 'A' | 'B' | 'C' | 'D'
+
+interface Attempt {
+  questionId: string
+  selected: Answer
+  correct: boolean
+  at: string
+  mode: Mode
+  countsForMastery: boolean
+}
+
+interface Result {
+  questionId: string
+  selected: Answer | null
+  correct: boolean
+}
+
+interface RecordItem {
+  id: string
+  completedAt: string
+  mode: Mode
+  filters: string
+  total: number
+  correct: number
+  results: Result[]
+}
+
+interface ActiveSession {
+  mode: Mode
+  questionIds: string[]
+  answers: Record<string, Answer>
+  revealed: string[]
+  marked?: string[]
+  index: number
+  filters: string
+  startedAt: string
+}
+
+interface StoredData {
+  version: 1
+  records: RecordItem[]
+  attempts: Attempt[]
+  active: ActiveSession | null
+}
+
+const storageKey = 'ai-practice-data-v1'
+const blankData = (): StoredData => ({ version: 1, records: [], attempts: [], active: null })
+
+const readData = (): StoredData => {
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem(storageKey) ?? '')
+    if (typeof parsed === 'object' && parsed !== null && 'version' in parsed && (parsed as StoredData).version === 1) {
+      const data = parsed as StoredData
+      return { records: Array.isArray(data.records) ? data.records : [], attempts: Array.isArray(data.attempts) ? data.attempts : [], active: data.active ?? null, version: 1 }
+    }
+  } catch { /* Start safely if browser data is malformed. */ }
+  return blankData()
+}
+
+const formatDate = (iso: string) => new Intl.DateTimeFormat('zh-TW', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(iso))
+const formatPercent = (correct: number, total: number) => total ? `${Math.round((correct / total) * 100)}%` : '—'
+const localDay = (date: Date) => date.toLocaleDateString('en-CA', { timeZone: 'Asia/Taipei' })
+
+const consecutiveDays = (records: RecordItem[]) => {
+  const days = new Set(records.map((record) => localDay(new Date(record.completedAt))))
+  let count = 0
+  const date = new Date()
+  while (days.has(localDay(date))) { count += 1; date.setDate(date.getDate() - 1) }
+  return count
+}
+
+const getMastery = (questionId: string, attempts: Attempt[]) => {
+  const history = attempts.filter((attempt) => attempt.questionId === questionId)
+  const failed = history.some((attempt) => !attempt.correct)
+  if (!failed) return 'new' as const
+  const lastWrong = history.filter((attempt) => !attempt.correct).at(-1)
+  const qualified = history.filter((attempt) => attempt.correct && attempt.countsForMastery && (!lastWrong || Date.parse(attempt.at) > Date.parse(lastWrong.at))).length
+  if (qualified >= 2) return 'mastered' as const
+  if (qualified === 1) return 'reviewed' as const
+  return 'due' as const
+}
+
+const masteryLabel = { new: '尚未作答', due: '待複習', reviewed: '複習答對', mastered: '已掌握' }
+
+export default function App() {
+  const [data, setData] = useState<StoredData>(readData)
+  const [page, setPage] = useState<Page>('home')
+  const [resumeChoice, setResumeChoice] = useState(Boolean(data.active))
+  const [subject, setSubject] = useState('all')
+  const [topic, setTopic] = useState('all')
+  const [source, setSource] = useState<'all' | SourceType>('all')
+  const [count, setCount] = useState('10')
+  const [mockSession, setMockSession] = useState(sessions[0] ?? '')
+  const [notice, setNotice] = useState('')
+
+  const persist = (next: StoredData) => { localStorage.setItem(storageKey, JSON.stringify(next)); setData(next) }
+  const activeQuestions = useMemo(() => data.active ? data.active.questionIds.map((id) => questions.find((question) => question.id === id)).filter((question): question is Question => Boolean(question)) : [], [data.active])
+  const activeQuestion = data.active ? activeQuestions[data.active.index] : undefined
+
+  const start = (mode: Mode, pool: readonly { id: string }[], filters: string) => {
+    if (!pool.length) { setNotice('沒有符合條件的題目。'); return }
+    const amount = count === 'all' ? pool.length : Math.min(Number(count), pool.length)
+    const selected = pool.slice(0, amount)
+    const active: ActiveSession = { mode, questionIds: selected.map((question) => question.id), answers: {}, revealed: [], marked: [], index: 0, filters, startedAt: new Date().toISOString() }
+    persist({ ...data, active })
+    setNotice('')
+  }
+
+  const startPractice = () => {
+    const pool = filterQuestions(questions, { ...(subject === 'all' ? {} : { subject }), ...(topic === 'all' ? {} : { topic }), ...(source === 'all' ? {} : { sourceType: source }) })
+    start('practice', randomSelectQuestions(pool, count === 'all' ? 'all' : Number(count)), [subject === 'all' ? '全部科目' : subject, topic === 'all' ? '全部主題' : topic, source === 'all' ? '全部來源' : sourceLabel[source]].join('／'))
+  }
+
+  const startWrong = () => {
+    const pool = questions.filter((question) => getMastery(question.id, data.attempts) === 'due')
+    start('wrong', randomSelectQuestions(pool, count === 'all' ? 'all' : Number(count)), '待複習錯題')
+  }
+
+  const startMock = () => {
+    const subjectForMock = subjects.find((item) => questions.filter((question) => question.source_type === 'official_exam' && question.session === mockSession && question.subject === item).length === 50)
+    if (!subjectForMock) { setNotice('此考次尚無可用的 50 題單科模擬測驗。'); return }
+    const exam = createMockExam(questions, { session: mockSession, subject: subjectForMock })
+    const active: ActiveSession = { mode: 'mock', questionIds: exam.questions.map((question) => question.id), answers: {}, revealed: [], marked: [], index: 0, filters: `${mockSession}／${subjectForMock}`, startedAt: new Date().toISOString() }
+    persist({ ...data, active }); setNotice('')
+  }
+
+  const choose = (answer: Answer) => {
+    if (!data.active || !activeQuestion) return
+    if (data.active.mode === 'practice' && data.active.revealed.includes(activeQuestion.id)) return
+    const revealed = data.active.mode === 'practice' ? [...data.active.revealed, activeQuestion.id] : data.active.revealed
+    persist({ ...data, active: { ...data.active, answers: { ...data.active.answers, [activeQuestion.id]: answer }, revealed } })
+  }
+
+  const complete = () => {
+    if (!data.active) return
+    const now = new Date().toISOString()
+    const results = data.active.questionIds.map((questionId) => {
+      const question = questions.find((item) => item.id === questionId)!
+      const selected = data.active!.answers[questionId] ?? null
+      return { questionId, selected, correct: selected === question.correct_answer }
+    })
+    const attempts: Attempt[] = [...data.attempts]
+    results.forEach((result) => {
+      if (!result.selected) return
+      const lastWrong = attempts.filter((attempt) => attempt.questionId === result.questionId && !attempt.correct).at(-1)
+      const prior = attempts.filter((attempt) => attempt.questionId === result.questionId && attempt.correct && attempt.countsForMastery && (!lastWrong || Date.parse(attempt.at) > Date.parse(lastWrong.at))).at(-1)
+      const countsForMastery = result.correct && data.active!.mode === 'wrong' && (!prior || Date.parse(now) - Date.parse(prior.at) >= 86_400_000)
+      attempts.push({ questionId: result.questionId, selected: result.selected, correct: result.correct, at: now, mode: data.active!.mode, countsForMastery })
+    })
+    const record: RecordItem = { id: crypto.randomUUID(), completedAt: now, mode: data.active.mode, filters: data.active.filters, total: results.length, correct: results.filter((result) => result.correct).length, results }
+    persist({ ...data, records: [record, ...data.records], attempts, active: null })
+    setResumeChoice(false)
+    setPage('history')
+  }
+
+  const abandon = () => { persist({ ...data, active: null }); setResumeChoice(false); setPage('home') }
+  const exportData = () => {
+    const blob = new Blob([JSON.stringify({ exportedAt: new Date().toISOString(), data }, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob); const link = document.createElement('a')
+    link.href = url; link.download = 'ai-practice-backup.json'; link.click(); URL.revokeObjectURL(url)
+  }
+  const importData = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    if (!file) return
+    try {
+      const parsed = JSON.parse(await file.text()) as { data?: StoredData }
+      if (!parsed.data || parsed.data.version !== 1 || !Array.isArray(parsed.data.records) || !Array.isArray(parsed.data.attempts)) throw new Error('invalid')
+      persist(parsed.data); setNotice('備份已匯入。')
+    } catch { setNotice('無法辨識此備份檔。') }
+    event.target.value = ''
+  }
+
+  if (data.active && resumeChoice) return <main className="app-shell"><section className="page"><h2>要繼續上次作答嗎？</h2><p className="muted">進度已保留，未交卷前不會計入成績。</p><button className="primary wide" onClick={() => setResumeChoice(false)}>繼續作答</button><button className="danger wide" onClick={abandon}>放棄這次作答</button></section></main>
+  if (data.active && activeQuestion) return <Quiz session={data.active} question={activeQuestion} index={data.active.index} total={activeQuestions.length} answer={data.active.answers[activeQuestion.id]} revealed={data.active.revealed.includes(activeQuestion.id)} onChoose={choose} onMove={(direction) => persist({ ...data, active: { ...data.active!, index: Math.min(Math.max(data.active!.index + direction, 0), activeQuestions.length - 1) } })} onMark={() => { const marked = data.active!.marked ?? []; persist({ ...data, active: { ...data.active!, marked: marked.includes(activeQuestion.id) ? marked.filter((id) => id !== activeQuestion.id) : [...marked, activeQuestion.id] } }) }} onComplete={complete} onAbandon={abandon} />
+
+  const masteryCounts = { due: questions.filter((question) => getMastery(question.id, data.attempts) === 'due').length, reviewed: questions.filter((question) => getMastery(question.id, data.attempts) === 'reviewed').length, mastered: questions.filter((question) => getMastery(question.id, data.attempts) === 'mastered').length }
+  const totalCorrect = data.records.reduce((sum, record) => sum + record.correct, 0)
+  const totalQuestions = data.records.reduce((sum, record) => sum + record.total, 0)
+
+  return <main className="app-shell">
+    <header><div><p className="eyebrow">AI 應用規劃師（初級）</p><h1>專心刷題，穩定進步</h1></div><button className="settings-button" onClick={() => setPage('settings')} aria-label="設定">⚙</button></header>
+    {notice && <p className="notice" role="status">{notice}</p>}
+    {page === 'home' && <section className="page"><div className="hero"><p>今天也為自己累積一點把握。</p><button className="primary" onClick={() => setPage('practice')}>開始練習</button></div><div className="metrics"><Metric label="累計作答" value={`${totalQuestions} 題`} /><Metric label="整體正確率" value={formatPercent(totalCorrect, totalQuestions)} /><Metric label="連續學習" value={`${consecutiveDays(data.records)} 天`} /></div><h2>學習狀態</h2><div className="status-grid"><StatusCard label="待複習" value={masteryCounts.due} state="due" /><StatusCard label="複習答對" value={masteryCounts.reviewed} state="reviewed" /><StatusCard label="已掌握" value={masteryCounts.mastered} state="mastered" /></div><h2>科目與主題表現</h2><CategoryStats records={data.records} /><h2>最近紀錄</h2><RecordList records={data.records.slice(0, 4)} /></section>}
+    {page === 'practice' && <section className="page"><h2>開始練習</h2><p className="muted">依你的弱點挑選題目，作答後立即看結果。</p><Filters subject={subject} topic={topic} source={source} count={count} onSubject={setSubject} onTopic={setTopic} onSource={setSource} onCount={setCount} /><button className="primary wide" onClick={startPractice}>開始隨機練習</button></section>}
+    {page === 'mock' && <section className="page"><h2>模擬測驗</h2><p className="muted">同一考次、同一科的 50 題官方考古題；交卷後統一評分。</p><label>選擇考次<select value={mockSession} onChange={(event) => setMockSession(event.target.value)}>{sessions.map((item) => <option key={item}>{item}</option>)}</select></label><button className="primary wide" onClick={startMock}>開始 50 題模擬測驗</button></section>}
+    {page === 'wrong' && <WrongPage attempts={data.attempts} counts={masteryCounts} onStart={startWrong} />}
+    {page === 'history' && <section className="page"><h2>學習紀錄</h2><RecordList records={data.records} detailed />{data.records[0] && <ReviewResults record={data.records[0]} />}<h2>科目與主題表現</h2><CategoryStats records={data.records} /></section>}
+    {page === 'settings' && <section className="page"><h2>設定與備份</h2><p className="muted">所有資料只留在此裝置的瀏覽器中。</p><button className="secondary wide" onClick={exportData}>匯出學習紀錄</button><label className="file-label">匯入 JSON 備份<input type="file" accept="application/json" onChange={importData} /></label><button className="danger wide" onClick={() => { if (window.confirm('確定清除所有作答紀錄、錯題與未完成作答嗎？此動作無法復原。')) { persist(blankData()); setPage('home') } }}>清除所有本機紀錄</button></section>}
+    <nav>{([['home', '首頁'], ['practice', '練習'], ['mock', '模考'], ['wrong', '錯題'], ['history', '紀錄']] as [Page, string][]).map(([key, label]) => <button key={key} className={page === key ? 'active' : ''} onClick={() => setPage(key)}>{label}</button>)}</nav>
+  </main>
+}
+
+function Quiz({ session, question, index, total, answer, revealed, onChoose, onMove, onMark, onComplete, onAbandon }: { session: ActiveSession; question: Question; index: number; total: number; answer?: Answer; revealed: boolean; onChoose: (answer: Answer) => void; onMove: (direction: number) => void; onMark: () => void; onComplete: () => void; onAbandon: () => void }) {
+  const isPractice = session.mode === 'practice'
+  const allAnswered = session.questionIds.every((id) => Boolean(session.answers[id]))
+  return <main className="quiz"><header><button className="text-button" onClick={onAbandon}>放棄</button><span>{isPractice ? '練習模式' : session.mode === 'wrong' ? '錯題重練' : '模擬測驗'}</span><strong>{index + 1} / {total}</strong></header><div className="progress"><span style={{ width: `${((index + 1) / total) * 100}%` }} /></div><section className="question-card"><p className="meta">{question.subject} · {question.topic} · {sourceLabel[question.source_type]}</p>{question.version_sensitive && <p className="notice">⚠ 依原考次資訊：{question.exam_date ?? '日期未提供'}</p>}<h2>{question.stem}</h2><div className="options">{(['A', 'B', 'C', 'D'] as Answer[]).map((item) => <button key={item} className={`option ${answer === item ? 'selected' : ''} ${revealed && item === question.correct_answer ? 'correct' : ''} ${revealed && answer === item && item !== question.correct_answer ? 'incorrect' : ''}`} onClick={() => onChoose(item)}><b>{item}</b><span>{question.options[item]}</span></button>)}</div>{revealed && <Feedback question={question} correct={answer === question.correct_answer} />}</section><footer>{!isPractice && <><button className="secondary" onClick={onMark}>{(session.marked ?? []).includes(question.id) ? '取消標記' : '標記待檢查'}</button><button className="secondary" onClick={() => onMove(-1)} disabled={index === 0}>上一題</button></>} {index < total - 1 ? <button className="primary" onClick={() => onMove(1)} disabled={isPractice && !revealed}>下一題</button> : <button className="primary" onClick={() => { if (isPractice || window.confirm('確定交卷並計算成績嗎？')) onComplete() }} disabled={!isPractice && !allAnswered}>{isPractice ? '完成練習' : allAnswered ? '交卷並評分' : `尚有 ${total - Object.keys(session.answers).length} 題未答`}</button>}</footer></main>
+}
+
+function Feedback({ question, correct }: { question: Question; correct: boolean }) { return <aside className={correct ? 'feedback good' : 'feedback bad'}><strong>{correct ? '答對了！' : `正確答案：${question.correct_answer}`}</strong><p>{question.explanation ?? '此官方考古題未提供官方解析。'}</p><p>學習指引：{question.guide_location.guide_heading}（{question.guide_location.guide_section}，紙本 {question.guide_location.guide_printed_pages}／PDF {question.guide_location.guide_pdf_pages}）</p>{question.version_sensitive && <p>⚠ 依原考次資訊：{question.exam_date ?? '日期未提供'}</p>}<small>{sourceLabel[question.source_type]}</small></aside> }
+
+function Filters({ subject, topic, source, count, onSubject, onTopic, onSource, onCount }: { subject: string; topic: string; source: 'all' | SourceType; count: string; onSubject: (value: string) => void; onTopic: (value: string) => void; onSource: (value: 'all' | SourceType) => void; onCount: (value: string) => void }) { return <div className="filters"><label>科目<select value={subject} onChange={(event) => onSubject(event.target.value)}><option value="all">全部科目</option>{subjects.map((item) => <option key={item}>{item}</option>)}</select></label><label>主題<select value={topic} onChange={(event) => onTopic(event.target.value)}><option value="all">全部主題</option>{topics.map((item) => <option key={item}>{item}</option>)}</select></label><label>來源<select value={source} onChange={(event) => onSource(event.target.value as 'all' | SourceType)}><option value="all">全部來源</option>{(Object.keys(sourceLabel) as SourceType[]).map((item) => <option key={item} value={item}>{sourceLabel[item]}</option>)}</select></label><label>題數<select value={count} onChange={(event) => onCount(event.target.value)}><option value="10">10 題</option><option value="20">20 題</option><option value="50">50 題</option><option value="all">全部符合條件的題目</option></select></label></div> }
+
+function Metric({ label, value }: { label: string; value: string }) { return <div className="metric"><span>{label}</span><strong>{value}</strong></div> }
+function StatusCard({ label, value, state }: { label: string; value: number; state: string }) { return <div className={`status-card ${state}`}><span>{label}</span><strong>{value}</strong><small>題</small></div> }
+function RecordList({ records, detailed = false }: { records: RecordItem[]; detailed?: boolean }) { return records.length ? <div className="record-list">{records.map((record) => <article key={record.id}><div><strong>{record.mode === 'mock' ? '模擬測驗' : record.mode === 'wrong' ? '錯題重練' : '練習'}</strong><span>{record.filters}</span><small>{formatDate(record.completedAt)}</small></div><b>{record.correct}/{record.total}<small> · {formatPercent(record.correct, record.total)}</small>{record.mode === 'mock' && <small> · {record.correct * 2} 分</small>}</b>{detailed && <em>{record.total - record.correct} 題待加強</em>}</article>)}</div> : <p className="empty">尚無完成紀錄，開始第一回練習吧。</p> }
+function QuestionStatusList({ attempts }: { attempts: Attempt[] }) { const ids = [...new Set(attempts.filter((attempt) => !attempt.correct).map((attempt) => attempt.questionId))]; return ids.length ? <div className="status-list">{ids.map((id) => { const question = questions.find((item) => item.id === id)!; const status = getMastery(id, attempts); const retries = attempts.filter((attempt) => attempt.questionId === id && attempt.correct && attempt.countsForMastery).length; return <article key={id}><div><strong>{question.topic}</strong><span>{question.stem}</span></div><b className={status}>{masteryLabel[status]}</b><small>有效複習答對 {retries}/2 次</small></article> })}</div> : <p className="empty">還沒有錯題紀錄。</p> }
+function CategoryStats({ records }: { records: RecordItem[] }) { const results = records.flatMap((record) => record.results); const rows = (values: string[], by: (question: Question) => string) => values.map((value) => { const ids = new Set(questions.filter((question) => by(question) === value).map((question) => question.id)); const matched = results.filter((result) => ids.has(result.questionId)); return { value, correct: matched.filter((result) => result.correct).length, total: matched.length } }).filter((row) => row.total); const subjectRows = rows(subjects, (question) => question.subject); const topicRows = rows(topics, (question) => question.topic).sort((a, b) => b.total - a.total).slice(0, 6); return <><h3>科目</h3><MiniStats rows={subjectRows} empty="完成練習後會顯示科目表現。" /><h3>主題（最近作答）</h3><MiniStats rows={topicRows} empty="完成練習後會顯示主題表現。" /></> }
+function MiniStats({ rows, empty }: { rows: { value: string; correct: number; total: number }[]; empty: string }) { return rows.length ? <div className="subject-stats">{rows.map((row) => <div key={row.value}><span>{row.value}</span><strong>{formatPercent(row.correct, row.total)}</strong><small>{row.correct}/{row.total} 題</small></div>)}</div> : <p className="empty">{empty}</p> }
+function ReviewResults({ record }: { record: RecordItem }) { return <section><h2>最近一次逐題結果</h2><div className="status-list">{record.results.map((result, index) => { const question = questions.find((item) => item.id === result.questionId)!; return <article key={result.questionId}><div><strong>第 {index + 1} 題 · {result.correct ? '答對' : '答錯'}</strong><span>{question.stem}</span></div><b>{result.selected ?? '未作答'}／{question.correct_answer}</b></article> })}</div></section> }
+function WrongPage({ attempts, counts, onStart }: { attempts: Attempt[]; counts: { due: number; reviewed: number; mastered: number }; onStart: () => void }) { const [filter, setFilter] = useState<'due' | 'reviewed' | 'mastered'>('due'); const visible = attempts.filter((attempt) => !attempt.correct).filter((attempt, index, all) => all.findIndex((item) => item.questionId === attempt.questionId) === index).filter((attempt) => getMastery(attempt.questionId, attempts) === filter); return <section className="page"><h2>錯題本</h2><p className="muted">錯題需在不同日累積兩次複習答對，才會標示為已掌握。</p><div className="status-grid"><StatusCard label="待複習" value={counts.due} state="due" /><StatusCard label="複習答對" value={counts.reviewed} state="reviewed" /><StatusCard label="已掌握" value={counts.mastered} state="mastered" /></div><div className="tab-row">{(['due', 'reviewed', 'mastered'] as const).map((state) => <button className={filter === state ? 'primary' : 'secondary'} key={state} onClick={() => setFilter(state)}>{masteryLabel[state]}</button>)}</div><button className="primary wide" disabled={!counts.due} onClick={onStart}>重練待複習錯題</button><QuestionStatusList attempts={visible.flatMap((item) => attempts.filter((attempt) => attempt.questionId === item.questionId))} /></section> }
