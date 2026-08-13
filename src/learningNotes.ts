@@ -4,6 +4,7 @@ export interface LearningNote {
   explanation: string
   explanationSource: 'official' | 'ai_summary'
   conceptSummary: string
+  materialSummary: string
   locatingText: string
   caution?: string
 }
@@ -30,6 +31,9 @@ export function getLearningNote(question: Question): LearningNote {
   const official = question.explanation?.trim()
   const baseSummary = topicSummaries[question.topic] ?? `本題聚焦「${question.topic}」。閱讀時先掌握該概念的定義、適用情境與限制，再比對題幹要求的條件。`
   const matchedTerms = Array.isArray(location.matched_terms) ? location.matched_terms.join('、') : location.matched_terms
+  const materialSummary = location.coverage === 'related'
+    ? `教材以「${location.guide_heading}」的上位概念作為本題的判斷基礎。${matchedTerms ? `先理解「${matchedTerms}」與題幹情境的關聯；` : ''}再回到題目條件，辨識正確答案「${question.answer_text}」所依據的概念。`
+    : `教材在「${location.guide_heading}」說明本題所需的概念。${matchedTerms ? `複習時先掌握「${matchedTerms}」；` : ''}本題要把這些概念套用到題幹情境，判斷為何「${question.answer_text}」最符合教材原則。`
   const locatingText = matchedTerms
     ? `請在「${location.guide_heading}」中優先尋找關鍵詞「${matchedTerms}」。`
     : `請閱讀「${location.guide_heading}」對應段落，並以題幹中的「${question.topic}」作為查找焦點。`
@@ -39,6 +43,7 @@ export function getLearningNote(question: Question): LearningNote {
       explanation: official,
       explanationSource: 'official',
       conceptSummary: baseSummary,
+      materialSummary,
       locatingText,
       caution: location.coverage === 'related' ? '此題的細節術語未必在指引中逐字出現；頁碼提供的是相關上位概念。' : undefined,
     }
@@ -48,6 +53,7 @@ export function getLearningNote(question: Question): LearningNote {
     explanation: `本題考查「${question.topic}」。正確選項是 ${question.correct_answer}：「${question.answer_text}」。作答時應先從題幹辨識要判斷的概念或情境，再選擇最符合該概念定義、流程或限制的敘述。`,
     explanationSource: 'ai_summary',
     conceptSummary: baseSummary,
+    materialSummary,
     locatingText,
     caution: location.coverage === 'related'
       ? `這是 ${sourceLabel[question.source_type]}；學習指引提供的是相關上位概念，請以原考次的題目與答案為準。`
