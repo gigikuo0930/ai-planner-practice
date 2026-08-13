@@ -80,7 +80,7 @@ export function getLearningNote(question: Question): LearningNote {
       conceptSummary: baseSummary,
       materialSummary,
       answerReasoning,
-      optionAnalysis: [],
+      optionAnalysis: buildOptionAnalysis(question),
       locatingText,
       caution: location.coverage === 'related' ? '此題的細節術語未必在指引中逐字出現；頁碼提供的是相關上位概念。' : undefined,
     }
