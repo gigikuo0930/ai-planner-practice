@@ -20,6 +20,9 @@ export interface Question {
     guide_heading: string
     guide_printed_pages: string
     guide_pdf_pages: string
+    coverage?: 'direct' | 'related'
+    note?: string
+    matched_terms?: string | string[]
   }
   topic: string
   version_sensitive: boolean

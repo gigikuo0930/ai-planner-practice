@@ -14,7 +14,7 @@ export interface GuideLocation {
   guide_pdf_pages?: string
   coverage?: 'direct' | 'related' | string
   note?: string
-  matched_terms?: string[]
+  matched_terms?: string | string[]
   matched_pdf_pages?: Array<number | string>
   matched_printed_pages?: string[]
   match_method?: string
