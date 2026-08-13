@@ -23,6 +23,7 @@ export interface Question {
     coverage?: 'direct' | 'related'
     note?: string
     matched_terms?: string | string[]
+    matched_pdf_pages?: number[]
   }
   topic: string
   version_sensitive: boolean
