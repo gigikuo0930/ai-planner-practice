@@ -6,6 +6,7 @@ export interface LearningNote {
   conceptSummary: string
   materialSummary: string
   answerReasoning: string
+  optionAnalysis: string[]
   locatingText: string
   caution?: string
 }
@@ -28,6 +29,26 @@ const topicReasoning: Record<string, string> = {
   '生成式 AI 應用領域與工具使用': '先確認任務目標、輸入資訊與輸出限制；正解應兼顧工具能力、提示品質與人工查核。',
   '生成式 AI 導入評估規劃': '先區分導入前的需求與風險盤點、試點驗證，以及上線後的成效衡量；正解應符合循序驗證、可衡量與風險可控的原則。',
   'No Code / Low Code 概念': '先看題幹需要的客製程度與開發能力；正解要符合 No Code 著重無程式建置、Low Code 可用少量程式延伸的差異。',
+}
+
+const shorten = (text: string, limit = 56) => text.length > limit ? `${text.slice(0, limit)}…` : text
+
+function buildOptionAnalysis(question: Question): string[] {
+  const correct = question.correct_answer
+  const choices = (Object.entries(question.options) as ['A' | 'B' | 'C' | 'D', string][])
+  if (/延遲|Latency/i.test(question.stem)) {
+    const latencyReasons: Partial<Record<'A' | 'B' | 'C' | 'D', string>> = {
+      A: '衡量單位時間可處理的訊息量，屬於吞吐量，不是單次互動的等待時間。',
+      B: '直接量到使用者送出問題後，收到完整回應所等待的時間，正是延遲指標。',
+      C: '衡量持續提供服務的時間，較接近可用性或穩定性，不是回應延遲。',
+      D: '衡量生成內容的品質特性，與回應完成所需時間無關。',
+    }
+    return choices.map(([choice, text]) => `${choice}「${shorten(text)}」：${latencyReasons[choice]}`)
+  }
+  const principle = topicReasoning[question.topic] ?? '題幹條件與教材概念的定義是否一致'
+  return choices.map(([choice, text]) => choice === correct
+    ? `${choice}「${shorten(text)}」：直接符合題幹所問的判斷條件，因此是正解。`
+    : `${choice}「${shorten(text)}」：雖可能是相關概念，但不能直接滿足題幹的判斷條件；本題應以「${shorten(question.answer_text)}」為準。${principle}`)
 }
 
 export const learningNoteSourceLabel = (question: Question, note: LearningNote) => {
@@ -59,17 +80,19 @@ export function getLearningNote(question: Question): LearningNote {
       conceptSummary: baseSummary,
       materialSummary,
       answerReasoning,
+      optionAnalysis: [],
       locatingText,
       caution: location.coverage === 'related' ? '此題的細節術語未必在指引中逐字出現；頁碼提供的是相關上位概念。' : undefined,
     }
   }
 
   return {
-    explanation: `本題考查「${question.topic}」。正確選項是 ${question.correct_answer}：「${question.answer_text}」。作答時應先從題幹辨識要判斷的概念或情境，再選擇最符合該概念定義、流程或限制的敘述。`,
+    explanation: `本題考查「${question.topic}」。正確選項是 ${question.correct_answer}：「${question.answer_text}」。以下以題幹條件、選項意義與教材對應概念進行非官方判讀。`,
     explanationSource: 'ai_summary',
     conceptSummary: baseSummary,
     materialSummary,
     answerReasoning,
+    optionAnalysis: buildOptionAnalysis(question),
     locatingText,
     caution: location.coverage === 'related'
       ? `這是 ${sourceLabel[question.source_type]}；學習指引提供的是相關上位概念，請以原考次的題目與答案為準。`
